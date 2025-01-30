@@ -16,16 +16,19 @@ export const authTypeSchema = z.nativeEnum(AuthType);
 export enum EModelEndpoint {
   azureOpenAI = 'azureOpenAI',
   openAI = 'openAI',
-  bingAI = 'bingAI',
-  chatGPTBrowser = 'chatGPTBrowser',
   google = 'google',
-  gptPlugins = 'gptPlugins',
   anthropic = 'anthropic',
   assistants = 'assistants',
   azureAssistants = 'azureAssistants',
   agents = 'agents',
   custom = 'custom',
   bedrock = 'bedrock',
+  /** @deprecated */
+  bingAI = 'bingAI',
+  /** @deprecated */
+  chatGPTBrowser = 'chatGPTBrowser',
+  /** @deprecated */
+  gptPlugins = 'gptPlugins',
 }
 
 export const paramEndpoints = new Set<EModelEndpoint | string>([
@@ -35,6 +38,7 @@ export const paramEndpoints = new Set<EModelEndpoint | string>([
   EModelEndpoint.azureOpenAI,
   EModelEndpoint.anthropic,
   EModelEndpoint.custom,
+  EModelEndpoint.google,
 ]);
 
 export enum BedrockProviders {
@@ -49,7 +53,11 @@ export enum BedrockProviders {
 
 export const getModelKey = (endpoint: EModelEndpoint | string, model: string) => {
   if (endpoint === EModelEndpoint.bedrock) {
-    return model.split('.')[0] as BedrockProviders;
+    const parts = model.split('.');
+    const provider = [parts[0], parts[1]].find((part) =>
+      Object.values(BedrockProviders).includes(part as BedrockProviders),
+    );
+    return (provider ?? parts[0]) as BedrockProviders;
   }
   return model;
 };
@@ -128,6 +136,7 @@ export const defaultAssistantFormValues = {
   code_interpreter: false,
   image_vision: false,
   retrieval: false,
+  append_current_datetime: false,
 };
 
 export const defaultAgentFormValues = {
@@ -368,7 +377,7 @@ export const tPluginSchema = z.object({
   name: z.string(),
   pluginKey: z.string(),
   description: z.string(),
-  icon: z.string(),
+  icon: z.string().optional(),
   authConfig: z.array(tPluginAuthConfigSchema).optional(),
   authenticated: z.boolean().optional(),
   isButton: z.boolean().optional(),
@@ -445,12 +454,13 @@ export const tMessageSchema = z.object({
   bg: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   title: z.string().nullable().or(z.literal('New Chat')).default('New Chat'),
-  sender: z.string(),
+  sender: z.string().optional(),
   text: z.string(),
   generation: z.string().nullable().optional(),
   isEdited: z.boolean().optional(),
   isCreatedByUser: z.boolean(),
-  error: z.boolean(),
+  error: z.boolean().optional(),
+  clientTimestamp: z.string().optional(),
   createdAt: z
     .string()
     .optional()
@@ -466,7 +476,7 @@ export const tMessageSchema = z.object({
   /* assistant */
   thread_id: z.string().optional(),
   /* frontend components */
-  iconURL: z.string().optional(),
+  iconURL: z.string().nullable().optional(),
 });
 
 export type TAttachmentMetadata = { messageId: string; toolCallId: string };
@@ -485,6 +495,7 @@ export type TMessage = z.input<typeof tMessageSchema> & {
   depth?: number;
   siblingIndex?: number;
   attachments?: TAttachment[];
+  clientTimestamp?: string;
 };
 
 export const coerceNumber = z.union([z.number(), z.string()]).transform((val) => {
@@ -516,7 +527,7 @@ const DocumentType: z.ZodType<DocumentTypeValue> = z.lazy(() =>
 export const tConversationSchema = z.object({
   conversationId: z.string().nullable(),
   endpoint: eModelEndpointSchema.nullable(),
-  endpointType: eModelEndpointSchema.optional(),
+  endpointType: eModelEndpointSchema.nullable().optional(),
   isArchived: z.boolean().optional(),
   title: z.string().nullable().or(z.literal('New Chat')).default('New Chat'),
   user: z.string().optional(),
@@ -549,9 +560,9 @@ export const tConversationSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   /* Files */
+  resendFiles: z.boolean().optional(),
   file_ids: z.array(z.string()).optional(),
   /* vision */
-  resendFiles: z.boolean().optional(),
   imageDetail: eImageDetailSchema.optional(),
   /* assistant */
   assistant_id: z.string().optional(),
@@ -561,16 +572,17 @@ export const tConversationSchema = z.object({
   region: z.string().optional(),
   maxTokens: coerceNumber.optional(),
   additionalModelRequestFields: DocumentType.optional(),
-  /* assistant + agents */
+  /* assistants */
   instructions: z.string().optional(),
   additional_instructions: z.string().optional(),
+  append_current_datetime: z.boolean().optional(),
   /** Used to overwrite active conversation settings when saving a Preset */
   presetOverride: z.record(z.unknown()).optional(),
   stop: z.array(z.string()).optional(),
   /* frontend components */
-  iconURL: z.string().optional(),
   greeting: z.string().optional(),
-  spec: z.string().optional(),
+  spec: z.string().nullable().optional(),
+  iconURL: z.string().nullable().optional(),
   /*
   Deprecated fields
   */
@@ -622,11 +634,77 @@ export const tConvoUpdateSchema = tConversationSchema.merge(
   }),
 );
 
-export const tPresetUpdateSchema = tConversationSchema.merge(
-  z.object({
-    endpoint: extendedModelEndpointSchema.nullable(),
-  }),
-);
+export const tQueryParamsSchema = tConversationSchema
+  .pick({
+    // librechat settings
+    /** The AI context window, overrides the system-defined window as determined by `model` value */
+    maxContextTokens: true,
+    /**
+     * Whether or not to re-submit files from previous messages on subsequent messages
+     * */
+    resendFiles: true,
+    /**
+     * @endpoints openAI, custom, azureOpenAI
+     *
+     * System parameter that only affects the above endpoints.
+     * Image detail for re-sizing according to OpenAI spec, defaults to `auto`
+     * */
+    imageDetail: true,
+    /**
+     * AKA Custom Instructions, dynamically added to chat history as a system message;
+     * for `bedrock` endpoint, this is used as the `system` model param if the provider uses it;
+     * for `assistants` endpoint, this is used as the `additional_instructions` model param:
+     * https://platform.openai.com/docs/api-reference/runs/createRun#runs-createrun-additional_instructions
+     * ; otherwise, a message with `system` role is added to the chat history
+     */
+    promptPrefix: true,
+    // Model parameters
+    /** @endpoints openAI, custom, azureOpenAI, google, anthropic, assistants, azureAssistants, bedrock */
+    model: true,
+    /** @endpoints openAI, custom, azureOpenAI, google, anthropic, bedrock */
+    temperature: true,
+    /** @endpoints openAI, custom, azureOpenAI */
+    presence_penalty: true,
+    /** @endpoints openAI, custom, azureOpenAI */
+    frequency_penalty: true,
+    /** @endpoints openAI, custom, azureOpenAI */
+    stop: true,
+    /** @endpoints openAI, custom, azureOpenAI */
+    top_p: true,
+    /** @endpoints openAI, custom, azureOpenAI */
+    max_tokens: true,
+    /** @endpoints google, anthropic, bedrock */
+    topP: true,
+    /** @endpoints google, anthropic */
+    topK: true,
+    /** @endpoints google, anthropic */
+    maxOutputTokens: true,
+    /** @endpoints anthropic */
+    promptCache: true,
+    /** @endpoints bedrock */
+    region: true,
+    /** @endpoints bedrock */
+    maxTokens: true,
+    /** @endpoints agents */
+    agent_id: true,
+    /** @endpoints assistants, azureAssistants */
+    assistant_id: true,
+    /** @endpoints assistants, azureAssistants */
+    append_current_datetime: true,
+    /**
+     * @endpoints assistants, azureAssistants
+     *
+     * Overrides existing assistant instructions, only used for the current run:
+     * https://platform.openai.com/docs/api-reference/runs/createRun#runs-createrun-instructions
+     * */
+    instructions: true,
+  })
+  .merge(
+    z.object({
+      /** @endpoints openAI, custom, azureOpenAI, google, anthropic, assistants, azureAssistants, bedrock, agents */
+      endpoint: extendedModelEndpointSchema.nullable(),
+    }),
+  );
 
 export type TPreset = z.infer<typeof tPresetSchema>;
 
@@ -642,13 +720,12 @@ export const tSharedLinkSchema = z.object({
   conversationId: z.string(),
   shareId: z.string(),
   messages: z.array(z.string()),
-  isAnonymous: z.boolean(),
   isPublic: z.boolean(),
-  isVisible: z.boolean(),
   title: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
+
 export type TSharedLink = z.infer<typeof tSharedLinkSchema>;
 
 export const tConversationTagSchema = z.object({
@@ -710,6 +787,25 @@ export const googleSchema = tConversationSchema
     spec: undefined,
     maxContextTokens: undefined,
   }));
+
+/**
+   * TODO: Map the following fields:
+  - presence_penalty -> presencePenalty
+  - frequency_penalty -> frequencyPenalty
+  - stop -> stopSequences
+   */
+export const googleGenConfigSchema = z
+  .object({
+    maxOutputTokens: coerceNumber.optional(),
+    temperature: coerceNumber.optional(),
+    topP: coerceNumber.optional(),
+    topK: coerceNumber.optional(),
+    presencePenalty: coerceNumber.optional(),
+    frequencyPenalty: coerceNumber.optional(),
+    stopSequences: z.array(z.string()).optional(),
+  })
+  .strip()
+  .optional();
 
 export const bingAISchema = tConversationSchema
   .pick({
@@ -849,6 +945,7 @@ export const assistantSchema = tConversationSchema
     iconURL: true,
     greeting: true,
     spec: true,
+    append_current_datetime: true,
   })
   .transform((obj) => ({
     ...obj,
@@ -859,6 +956,7 @@ export const assistantSchema = tConversationSchema
     iconURL: obj.iconURL ?? undefined,
     greeting: obj.greeting ?? undefined,
     spec: obj.spec ?? undefined,
+    append_current_datetime: obj.append_current_datetime ?? false,
   }))
   .catch(() => ({
     model: openAISettings.model.default,
@@ -868,6 +966,7 @@ export const assistantSchema = tConversationSchema
     iconURL: undefined,
     greeting: undefined,
     spec: undefined,
+    append_current_datetime: false,
   }));
 
 export const compactAssistantSchema = tConversationSchema
@@ -1096,13 +1195,14 @@ export type TBanner = z.infer<typeof tBannerSchema>;
 
 export const compactAgentsSchema = tConversationSchema
   .pick({
-    model: true,
-    agent_id: true,
-    instructions: true,
-    additional_instructions: true,
+    spec: true,
+    // model: true,
     iconURL: true,
     greeting: true,
-    spec: true,
+    agent_id: true,
+    resendFiles: true,
+    instructions: true,
+    additional_instructions: true,
   })
   .transform(removeNullishValues)
   .catch(() => ({}));

@@ -18,7 +18,12 @@ const citationRegex = /\[\^\d+?\^]/g;
 const addSpaceIfNeeded = (text) => (text.length > 0 && !text.endsWith(' ') ? text + ' ' : text);
 
 const base = { message: true, initial: true };
-const createOnProgress = ({ generation = '', onProgress: _onProgress }) => {
+const createOnProgress = (
+  { generation = '', onProgress: _onProgress } = {
+    generation: '',
+    onProgress: null,
+  },
+) => {
   let i = 0;
   let tokens = addSpaceIfNeeded(generation);
 
@@ -196,14 +201,11 @@ function generateConfig(key, baseURL, endpoint) {
 
   if (agents) {
     config.capabilities = [
+      AgentCapabilities.execute_code,
       AgentCapabilities.file_search,
       AgentCapabilities.actions,
       AgentCapabilities.tools,
     ];
-
-    if (key === 'EXPERIMENTAL_RUN_CODE') {
-      config.capabilities.push(AgentCapabilities.execute_code);
-    }
   }
 
   if (assistants && endpoint === EModelEndpoint.azureAssistants) {
